@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import altair as alt
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Try streamlit-local-storage (optional)
+# Optional local storage support
 try:
     from streamlit_local_storage import LocalStorage
     HAS_LOCAL_STORAGE = True
@@ -20,7 +19,7 @@ except Exception:
 st.set_page_config(
     page_title="Netflix Recommendation System",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
 )
 
 st.title("🎬 Netflix Recommendation System & Analytics Dashboard")
@@ -29,13 +28,12 @@ st.markdown(
 Upload a **Netflix-style CSV** and this app will:
 
 1. **Clean** messy data (whitespace, missing values, basic type fixes)  
-2. Show a **KPI dashboard** with interactive visualizations  
-3. Offer **content-based recommendations** using genres + description  
-4. (Optional) Remember your **last selected title** using local storage
+2. Show a **KPI dashboard** with visualizations  
+3. Provide **content-based recommendations** using genres + description  
+4. Optionally remember your **last selected title** using local storage
 """
 )
 
-# Initialize local storage if available
 localS = LocalStorage() if HAS_LOCAL_STORAGE else None
 
 
@@ -65,7 +63,7 @@ def clean_netflix_data(df: pd.DataFrame) -> pd.DataFrame:
     if "release_year" in df.columns:
         df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce")
 
-    # Parse duration into a numeric column (minutes or seasons count)
+    # Parse duration into numeric value (minutes or seasons count)
     if "duration" in df.columns:
         def parse_duration(x):
             x = str(x)
@@ -96,7 +94,7 @@ def clean_netflix_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------
-# KPI + charts
+# KPI + charts (Streamlit native charts)
 # --------------------
 def show_kpis_and_charts(df: pd.DataFrame):
     st.subheader("📊 Key Performance Indicators (KPIs)")
@@ -128,22 +126,10 @@ def show_kpis_and_charts(df: pd.DataFrame):
             type_counts = (
                 df["type"]
                 .value_counts()
-                .reset_index()
-                .rename(columns={"index": "type", "type": "count"})
+                .rename_axis("type")
+                .to_frame("count")
             )
-            # Ensure no duplicate columns
-            type_counts = type_counts.loc[:, ~type_counts.columns.duplicated()]
-
-            chart = (
-                alt.Chart(type_counts)
-                .mark_bar()
-                .encode(
-                    x=alt.X("type:N", title="Type"),
-                    y=alt.Y("count:Q", title="Number of Titles"),
-                    tooltip=["type", "count"],
-                )
-            )
-            st.altair_chart(chart, use_container_width=True)
+            st.bar_chart(type_counts)
 
     # ---- Top Genres ----
     if "listed_in" in df.columns:
@@ -168,18 +154,8 @@ def show_kpis_and_charts(df: pd.DataFrame):
                 .sort_values("count", ascending=False)
                 .head(15)
             )
-            genre_counts = genre_counts.loc[:, ~genre_counts.columns.duplicated()]
-
-            chart = (
-                alt.Chart(genre_counts)
-                .mark_bar()
-                .encode(
-                    x=alt.X("count:Q", title="Number of Titles"),
-                    y=alt.Y("genre:N", sort="-x", title="Genre"),
-                    tooltip=["genre", "count"],
-                )
-            )
-            st.altair_chart(chart, use_container_width=True)
+            genre_counts = genre_counts.set_index("genre")
+            st.bar_chart(genre_counts)
 
     st.markdown("---")
     col_left2, col_right2 = st.columns(2)
@@ -195,18 +171,8 @@ def show_kpis_and_charts(df: pd.DataFrame):
                 .reset_index(name="count")
                 .sort_values("release_year")
             )
-            year_counts = year_counts.loc[:, ~year_counts.columns.duplicated()]
-
-            chart = (
-                alt.Chart(year_counts)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("release_year:O", title="Release Year"),
-                    y=alt.Y("count:Q", title="Number of Titles"),
-                    tooltip=["release_year", "count"],
-                )
-            )
-            st.altair_chart(chart, use_container_width=True)
+            year_counts = year_counts.set_index("release_year")
+            st.line_chart(year_counts)
 
     # ---- Top Countries ----
     if "country" in df.columns:
@@ -229,18 +195,8 @@ def show_kpis_and_charts(df: pd.DataFrame):
                 .sort_values("count", ascending=False)
                 .head(10)
             )
-            country_counts = country_counts.loc[:, ~country_counts.columns.duplicated()]
-
-            chart = (
-                alt.Chart(country_counts)
-                .mark_bar()
-                .encode(
-                    x=alt.X("count:Q", title="Number of Titles"),
-                    y=alt.Y("country:N", sort="-x", title="Country"),
-                    tooltip=["country", "count"],
-                )
-            )
-            st.altair_chart(chart, use_container_width=True)
+            country_counts = country_counts.set_index("country")
+            st.bar_chart(country_counts)
 
 
 # --------------------
@@ -291,7 +247,10 @@ def get_recommendations(title, cosine_sim, df, n_recs=10):
 
     recs = df.iloc[movie_indices].copy()
     recs["similarity"] = [s[1] for s in sim_scores]
-    columns_to_show = [c for c in ["title", "type", "listed_in", "country", "similarity"] if c in recs.columns]
+    columns_to_show = [
+        c for c in ["title", "type", "listed_in", "country", "similarity"]
+        if c in recs.columns
+    ]
     return recs[columns_to_show]
 
 
@@ -302,7 +261,10 @@ st.sidebar.header("Upload Dataset")
 uploaded_file = st.sidebar.file_uploader(
     "Upload Netflix CSV",
     type=["csv"],
-    help="Upload a CSV with columns like: show_id, type, title, country, date_added, release_year, rating, duration, listed_in, description"
+    help=(
+        "Upload a CSV with columns like: show_id, type, title, "
+        "country, date_added, release_year, rating, duration, listed_in, description"
+    ),
 )
 
 st.sidebar.markdown(
@@ -315,7 +277,6 @@ st.sidebar.markdown(
 """
 )
 
-
 # --------------------
 # Main logic
 # --------------------
@@ -324,7 +285,7 @@ if uploaded_file is None:
     st.markdown(
         """
 You can use your own Netflix catalogue or a synthetic dataset  
-with ~1000 rows that follows a similar schema.
+with ~1000 rows following a similar schema.
 """
     )
 else:
@@ -345,6 +306,9 @@ else:
     # KPIs & Visuals
     show_kpis_and_charts(df)
 
+    # --------------------
+    # Recommendations
+    # --------------------
     st.markdown("---")
     st.subheader("🎯 Content-Based Recommendations")
 
@@ -366,7 +330,7 @@ else:
         selected_title = st.selectbox(
             "Select a title to get similar recommendations:",
             options=titles_sorted,
-            index=default_index if default_index < len(titles_sorted) else 0
+            index=default_index if default_index < len(titles_sorted) else 0,
         )
 
         # Save selection to local storage
@@ -383,7 +347,10 @@ else:
                 recs = get_recommendations(selected_title, cosine_sim, model_df)
 
             if recs.empty:
-                st.warning("No recommendations could be generated. Check that `listed_in` and/or `description` exist.")
+                st.warning(
+                    "No recommendations could be generated. "
+                    "Check that `listed_in` and/or `description` columns exist."
+                )
             else:
                 st.success(f"Titles similar to **{selected_title}**:")
                 st.dataframe(recs)
