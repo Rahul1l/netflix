@@ -2,80 +2,92 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
-from streamlit_local_storage import LocalStorage
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import json
+
+# Try streamlit-local-storage (optional)
+try:
+    from streamlit_local_storage import LocalStorage
+    HAS_LOCAL_STORAGE = True
+except Exception:
+    HAS_LOCAL_STORAGE = False
+    LocalStorage = None
 
 # --------------------
 # Page config
 # --------------------
 st.set_page_config(
-    page_title="Netflix Recommendation & Insights",
+    page_title="Netflix Recommendation System",
     page_icon="🎬",
     layout="wide"
 )
 
-st.title("🎬 Netflix Recommendation System & Dashboard")
+st.title("🎬 Netflix Recommendation System & Analytics Dashboard")
 st.markdown(
     """
-Upload a **Netflix-style catalogue CSV** and the app will:
+Upload a **Netflix-style CSV** and this app will:
 
-1. Clean messy data (whitespaces, missing values, duplicates, types)  
-2. Show a **KPI dashboard & visualizations**  
-3. Provide **content-based recommendations**  
-4. Use **Streamlit Local Storage** to remember your last selected title
+1. **Clean** messy data (whitespace, missing values, basic type fixes)  
+2. Show a **KPI dashboard** with interactive visualizations  
+3. Offer **content-based recommendations** using genres + description  
+4. (Optional) Remember your **last selected title** using local storage
 """
 )
 
-localS = LocalStorage()  # for browser local storage
+# Initialize local storage if available
+localS = LocalStorage() if HAS_LOCAL_STORAGE else None
+
 
 # --------------------
-# Data cleaning utils
+# Data cleaning
 # --------------------
 def clean_netflix_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Standardize column names
+    # Normalize column names
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
-    # Strip whitespace from object columns
-    obj_cols = df.select_dtypes(include=["object"]).columns
-    for col in obj_cols:
-        df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan})
+    # Strip whitespace from string columns
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.strip()
+            .replace({"nan": np.nan, "None": np.nan})
+        )
 
-    # Parse date_added if present
+    # Parse date_added
     if "date_added" in df.columns:
         df["date_added"] = pd.to_datetime(df["date_added"], errors="coerce")
 
-    # Convert release_year to numeric
+    # Ensure numeric release_year
     if "release_year" in df.columns:
         df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce")
 
-    # Basic duration parsing
+    # Parse duration into a numeric column (minutes or seasons count)
     if "duration" in df.columns:
         def parse_duration(x):
             x = str(x)
-            if "Season" in x:
-                # TV shows: keep seasons count
-                num = x.split()[0]
-                return int(num) if num.isdigit() else np.nan
-            elif "min" in x:
-                num = x.split()[0]
-                return int(num) if num.isdigit() else np.nan
-            return np.nan
+            parts = x.split()
+            if not parts:
+                return np.nan
+            num = parts[0]
+            if not num.isdigit():
+                return np.nan
+            return int(num)
 
-        df["duration_parsed"] = df["duration"].apply(parse_duration)
+        df["duration_value"] = df["duration"].apply(parse_duration)
 
     # Drop exact duplicates
     df = df.drop_duplicates()
 
-    # Fill some common missing columns
+    # Fill some important categorical columns
     for col in ["country", "rating", "listed_in"]:
         if col in df.columns:
             df[col] = df[col].fillna("Unknown")
 
-    # Title/type basic cleaning
+    # Clean title and type
     for col in ["title", "type"]:
         if col in df.columns:
             df[col] = df[col].str.title()
@@ -84,39 +96,46 @@ def clean_netflix_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------
-# KPI & visualization
+# KPI + charts
 # --------------------
 def show_kpis_and_charts(df: pd.DataFrame):
     st.subheader("📊 Key Performance Indicators (KPIs)")
 
     total_titles = len(df)
-    num_movies = len(df[df["type"] == "Movie"]) if "type" in df.columns else np.nan
-    num_tvshows = len(df[df["type"] == "Tv Show"]) if "type" in df.columns else np.nan
+    num_movies = None
+    num_tvshows = None
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Titles", f"{total_titles:,}")
-    if not np.isnan(num_movies):
-        col2.metric("Movies", f"{num_movies:,}")
-    if not np.isnan(num_tvshows):
-        col3.metric("TV Shows", f"{num_tvshows:,}")
+    if "type" in df.columns:
+        num_movies = (df["type"] == "Movie").sum()
+        num_tvshows = (df["type"] == "Tv Show").sum()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Titles", f"{total_titles:,}")
+    if num_movies is not None:
+        c2.metric("Movies", f"{num_movies:,}")
+    if num_tvshows is not None:
+        c3.metric("TV Shows", f"{num_tvshows:,}")
 
     st.markdown("---")
     st.subheader("📈 Visualizations")
 
-    c1, c2 = st.columns(2)
+    col_left, col_right = st.columns(2)
 
-    # Distribution by type
+    # ---- Titles by Type ----
     if "type" in df.columns:
-        with c1:
+        with col_left:
             st.markdown("**Titles by Type**")
-            chart_df = (
+            type_counts = (
                 df["type"]
                 .value_counts()
                 .reset_index()
                 .rename(columns={"index": "type", "type": "count"})
             )
+            # Ensure no duplicate columns
+            type_counts = type_counts.loc[:, ~type_counts.columns.duplicated()]
+
             chart = (
-                alt.Chart(chart_df)
+                alt.Chart(type_counts)
                 .mark_bar()
                 .encode(
                     x=alt.X("type:N", title="Type"),
@@ -126,23 +145,31 @@ def show_kpis_and_charts(df: pd.DataFrame):
             )
             st.altair_chart(chart, use_container_width=True)
 
-    # Top genres / listed_in
+    # ---- Top Genres ----
     if "listed_in" in df.columns:
-        with c2:
+        with col_right:
             st.markdown("**Top Genres**")
+
+            # Split multi-genre values into rows
             genre_series = (
                 df["listed_in"]
                 .dropna()
                 .str.split(",", expand=True)
                 .stack()
                 .str.strip()
+                .rename("genre")
             )
+
             genre_counts = (
-                genre_series.value_counts()
-                .reset_index()
-                .rename(columns={"index": "genre", "listed_in": "count"})
+                genre_series.to_frame()
+                .groupby("genre")
+                .size()
+                .reset_index(name="count")
+                .sort_values("count", ascending=False)
                 .head(15)
             )
+            genre_counts = genre_counts.loc[:, ~genre_counts.columns.duplicated()]
+
             chart = (
                 alt.Chart(genre_counts)
                 .mark_bar()
@@ -155,18 +182,21 @@ def show_kpis_and_charts(df: pd.DataFrame):
             st.altair_chart(chart, use_container_width=True)
 
     st.markdown("---")
-    c3, c4 = st.columns(2)
+    col_left2, col_right2 = st.columns(2)
 
-    # Titles over years
+    # ---- Titles by Release Year ----
     if "release_year" in df.columns:
-        with c3:
+        with col_left2:
             st.markdown("**Titles by Release Year**")
             year_counts = (
                 df.dropna(subset=["release_year"])
                 .groupby("release_year")
                 .size()
                 .reset_index(name="count")
+                .sort_values("release_year")
             )
+            year_counts = year_counts.loc[:, ~year_counts.columns.duplicated()]
+
             chart = (
                 alt.Chart(year_counts)
                 .mark_line(point=True)
@@ -178,21 +208,29 @@ def show_kpis_and_charts(df: pd.DataFrame):
             )
             st.altair_chart(chart, use_container_width=True)
 
-    # Top countries
+    # ---- Top Countries ----
     if "country" in df.columns:
-        with c4:
+        with col_right2:
             st.markdown("**Top Countries**")
-            country_counts = (
+            country_series = (
                 df["country"]
                 .fillna("Unknown")
                 .str.split(",", expand=True)
                 .stack()
                 .str.strip()
-                .value_counts()
-                .reset_index()
-                .rename(columns={"index": "country", "country": "count"})
+                .rename("country")
+            )
+
+            country_counts = (
+                country_series.to_frame()
+                .groupby("country")
+                .size()
+                .reset_index(name="count")
+                .sort_values("count", ascending=False)
                 .head(10)
             )
+            country_counts = country_counts.loc[:, ~country_counts.columns.duplicated()]
+
             chart = (
                 alt.Chart(country_counts)
                 .mark_bar()
@@ -206,7 +244,7 @@ def show_kpis_and_charts(df: pd.DataFrame):
 
 
 # --------------------
-# Simple content-based recommender
+# Recommender
 # --------------------
 @st.cache_resource(show_spinner=False)
 def build_recommender_model(df: pd.DataFrame):
@@ -214,23 +252,23 @@ def build_recommender_model(df: pd.DataFrame):
     if "title" not in df.columns:
         return None, None
 
-    text_parts = []
+    text_components = []
     if "listed_in" in df.columns:
-        text_parts.append(df["listed_in"].fillna(""))
+        text_components.append(df["listed_in"].fillna(""))
     if "description" in df.columns:
-        text_parts.append(df["description"].fillna(""))
+        text_components.append(df["description"].fillna(""))
 
-    if not text_parts:
+    if not text_components:
         return None, None
 
-    combined_text = (
-        text_parts[0] if len(text_parts) == 1 else text_parts[0] + " " + text_parts[1]
-    )
+    if len(text_components) == 1:
+        combined = text_components[0]
+    else:
+        combined = text_components[0] + " " + text_components[1]
 
     vectorizer = TfidfVectorizer(stop_words="english")
-    tfidf_matrix = vectorizer.fit_transform(combined_text)
+    tfidf_matrix = vectorizer.fit_transform(combined)
 
-    # Cosine similarity matrix (can be large, but fine for ~1k rows)
     cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
     return cosine_sim, df.reset_index(drop=True)
 
@@ -239,7 +277,7 @@ def get_recommendations(title, cosine_sim, df, n_recs=10):
     if cosine_sim is None or df is None:
         return pd.DataFrame()
 
-    titles = df["title"]
+    titles = df["title"].astype(str)
     indices = pd.Series(df.index, index=titles.str.lower())
 
     key = title.lower()
@@ -249,11 +287,12 @@ def get_recommendations(title, cosine_sim, df, n_recs=10):
     idx = indices[key]
     sim_scores = list(enumerate(cosine_sim[idx]))
     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1 : n_recs + 1]
-
     movie_indices = [i[0] for i in sim_scores]
+
     recs = df.iloc[movie_indices].copy()
     recs["similarity"] = [s[1] for s in sim_scores]
-    return recs[["title", "type", "listed_in", "country", "similarity"]]
+    columns_to_show = [c for c in ["title", "type", "listed_in", "country", "similarity"] if c in recs.columns]
+    return recs[columns_to_show]
 
 
 # --------------------
@@ -261,100 +300,98 @@ def get_recommendations(title, cosine_sim, df, n_recs=10):
 # --------------------
 st.sidebar.header("Upload Dataset")
 uploaded_file = st.sidebar.file_uploader(
-    "Upload Netflix CSV", type=["csv"], help="Upload a CSV with Netflix-style columns"
+    "Upload Netflix CSV",
+    type=["csv"],
+    help="Upload a CSV with columns like: show_id, type, title, country, date_added, release_year, rating, duration, listed_in, description"
 )
 
 st.sidebar.markdown(
     """
-**Expected columns (recommended):**
+**Recommended columns:**
 
-- `show_id`, `type`, `title`, `director`, `cast`,  
-- `country`, `date_added`, `release_year`, `rating`,  
-- `duration`, `listed_in`, `description`
+- `show_id`, `type`, `title`, `director`, `cast`  
+- `country`, `date_added`, `release_year`  
+- `rating`, `duration`, `listed_in`, `description`
 """
 )
+
 
 # --------------------
 # Main logic
 # --------------------
 if uploaded_file is None:
-    st.info("👆 Upload a CSV file from the sidebar to get started.")
+    st.info("👆 Upload a CSV file from the sidebar to start.")
     st.markdown(
         """
-If you don't have a dataset, you can start with the **sample 1000-row dataset** I generated for you.
+You can use your own Netflix catalogue or a synthetic dataset  
+with ~1000 rows that follows a similar schema.
 """
     )
-    st.code("netflix_sample_1000.csv  # place this in your project folder", language="bash")
 else:
-    # Read & clean
+    # Raw preview
     raw_df = pd.read_csv(uploaded_file)
-    st.subheader("🧹 Raw Data Preview")
+    st.subheader("🧾 Raw Data Preview")
     st.dataframe(raw_df.head())
+    st.caption(f"Raw shape: {raw_df.shape[0]} rows × {raw_df.shape[1]} columns")
 
+    # Cleaning
     with st.spinner("Cleaning data..."):
         df = clean_netflix_data(raw_df)
 
-    st.subheader("✅ Cleaned Data Preview")
+    st.subheader("🧹 Cleaned Data Preview")
     st.dataframe(df.head())
-
-    # Display shape
-    st.caption(f"Dataset shape after cleaning: {df.shape[0]} rows × {df.shape[1]} columns")
+    st.caption(f"Cleaned shape: {df.shape[0]} rows × {df.shape[1]} columns")
 
     # KPIs & Visuals
     show_kpis_and_charts(df)
 
-    # --------------------
-    # Recommendation section
-    # --------------------
     st.markdown("---")
     st.subheader("🎯 Content-Based Recommendations")
 
-    # Use local storage to remember last selected title
-    try:
-        saved_title = localS.getItem("selected_title")
-    except Exception:
-        saved_title = None
+    if "title" not in df.columns or df["title"].dropna().empty:
+        st.warning("No valid `title` column found. Cannot build recommendations.")
+    else:
+        titles_sorted = sorted(df["title"].dropna().unique().tolist())
 
-    available_titles = sorted(df["title"].dropna().unique()) if "title" in df.columns else []
+        # Restore last selected title from local storage if available
+        default_index = 0
+        if HAS_LOCAL_STORAGE and localS is not None:
+            try:
+                saved_title = localS.getItem("selected_title")
+                if saved_title and saved_title in titles_sorted:
+                    default_index = titles_sorted.index(saved_title)
+            except Exception:
+                saved_title = None
 
-    default_index = 0
-    if saved_title and saved_title in available_titles:
-        default_index = available_titles.index(saved_title)
-
-    if available_titles:
         selected_title = st.selectbox(
             "Select a title to get similar recommendations:",
-            options=available_titles,
-            index=default_index if default_index < len(available_titles) else 0,
+            options=titles_sorted,
+            index=default_index if default_index < len(titles_sorted) else 0
         )
 
         # Save selection to local storage
-        try:
-            localS.setItem("selected_title", selected_title)
-        except Exception:
-            pass  # component might fail silently in some environments
+        if HAS_LOCAL_STORAGE and localS is not None:
+            try:
+                localS.setItem("selected_title", selected_title)
+            except Exception:
+                pass
 
         cosine_sim, model_df = build_recommender_model(df)
 
-        if st.button("Get Recommendations"):
-            with st.spinner("Computing recommendations..."):
+        if st.button("🔍 Get Recommendations"):
+            with st.spinner("Finding similar titles..."):
                 recs = get_recommendations(selected_title, cosine_sim, model_df)
 
-            if not recs.empty:
-                st.success(f"Recommendations similar to **{selected_title}**:")
-                st.dataframe(recs)
+            if recs.empty:
+                st.warning("No recommendations could be generated. Check that `listed_in` and/or `description` exist.")
             else:
-                st.warning("No recommendations available. Check if required columns exist (e.g., `listed_in`, `description`).")
-    else:
-        st.warning("No `title` column found or it is empty – cannot build recommendations.")
+                st.success(f"Titles similar to **{selected_title}**:")
+                st.dataframe(recs)
 
-    # --------------------
-    # Debug / Local Storage Viewer
-    # --------------------
-    with st.expander("🧪 Local Storage (Debug)"):
-        st.write("Items stored in browser local storage:")
-        try:
-            all_items = localS.getAll()
-            st.json(all_items)
-        except Exception:
-            st.write("Local storage not available or component not working in this environment.")
+    # Optional: debug local storage
+    if HAS_LOCAL_STORAGE and localS is not None:
+        with st.expander("🧪 Local Storage (debug)"):
+            try:
+                st.json(localS.getAll())
+            except Exception:
+                st.write("Could not read local storage.")
